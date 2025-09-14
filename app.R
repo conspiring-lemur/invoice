@@ -1,6 +1,6 @@
 # app.R
 # Shiny Invoice Builder with SQLite archive + PDF generator (R Markdown)
-
+ 
 # ---- Packages ----
 library(shiny)
 library(DT)
