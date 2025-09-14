@@ -1,0 +1,58 @@
+---
+title: "Invoice"
+output:
+  pdf_document:
+    toc: false
+    number_sections: false
+    latex_engine: xelatex
+geometry: margin=1in
+params:
+  invoice_number: ""
+  consultant_name: ""
+  consultant_address: ""
+  client_name: ""
+  client_org: ""
+  client_address: ""
+  project_title: ""
+  period_start: ""
+  period_end: ""
+  items: !r data.frame()
+  total_hours: 0
+  total_amount: 0
+  invoice_date: ""
+---
+
+## **Invoice: `r params$invoice_number`**
+
+**Consultant:**  
+`r params$consultant_name`  
+`r params$consultant_address`
+
+**Bill To:**  
+`r params$client_name`  
+`r params$client_org`  
+`r params$client_address`
+
+**Project:** `r params$project_title`  
+**Invoice Period:** `r params$period_start` – `r params$period_end`  
+**Invoice Date:** `r params$invoice_date`
+
+### Task Details
+```{r, echo=FALSE}
+library(knitr); library(dplyr); library(scales)
+items <- params$items %>%
+  mutate(Date = as.character(Date),
+         Hours = round(Hours, 2),
+         Rate = dollar(Rate),
+         Amount = dollar(Amount)) %>%
+  select(Date, Description, Hours, Rate, Amount)
+kable(items, align="l", booktabs=TRUE)
+```
+
+Total Hours: `r round(params$total_hours, 2)`
+Amount Due: `r scales::dollar(params$total_amount)`
+
+Consultant’s Signature: ________________________________
+Date: __________________
+
+
