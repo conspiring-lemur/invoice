@@ -15,7 +15,10 @@ library(rmarkdown)
 # ---- Paths & Setup ----
 db_path <- "invoices.sqlite"
 pdf_dir <- "invoices"
-if (!dir_exists(pdf_dir)) dir_create(pdf_dir)
+if (!fs::dir_exists(pdf_dir)) fs::dir_create(pdf_dir)
+
+# Serve generated PDFs under a relative path that works behind proxies (Workbench)
+shiny::addResourcePath("invoices", normalizePath(pdf_dir, mustWork = TRUE))
 
 # Path to template
 template_path <- "invoice_template.Rmd"
@@ -71,7 +74,45 @@ onStop(function() {
   dbDisconnect(con)
 })
 
+# --- Helpers to prevent "invalid JSON response" in DT ---
+to_chr <- function(x) {
+  # collapse non-atomic/list columns; format numerics safely
+  if (is.list(x)) x <- vapply(x, function(e) paste(capture.output(str(e)), collapse=" "), character(1))
+  if (is.numeric(x)) return(formatC(x, format = "g", digits = 12))
+  if (inherits(x, "POSIXt")) return(format(x, "%Y-%m-%d %H:%M:%S", tz = "UTC"))
+  if (inherits(x, "Date")) return(format(x, "%Y-%m-%d"))
+  as.character(x)
+}
+
+sanitize_df <- function(df) {
+  if (is.null(df) || !nrow(df)) return(data.frame(Message = "No data.", stringsAsFactors = FALSE))
+  out <- lapply(df, to_chr)
+  out <- as.data.frame(out, stringsAsFactors = FALSE, check.names = FALSE)
+  # ensure valid UTF-8 (DT/jsonlite can choke on native encodings)
+  out[] <- lapply(out, function(col) enc2utf8(replace(col, is.na(col), "")))
+  out
+}
+
+safe_dt <- function(expr, page_len = 10, escape_html = TRUE) {
+  tryCatch({
+    df <- expr
+    df <- sanitize_df(df)
+    DT::datatable(
+      df,
+      rownames = FALSE,
+      escape   = escape_html,  # set FALSE only if you deliberately create HTML
+      options  = list(pageLength = page_len)
+    )
+  }, error = function(e) {
+    DT::datatable(
+      data.frame(Error = enc2utf8(paste("Render error:", conditionMessage(e))), stringsAsFactors = FALSE),
+      rownames = FALSE
+    )
+  })
+}
+
 # ---- Helpers ----
+
 read_draft <- function() {
   dbReadTable(con, "draft_items") %>% arrange(task_date, id)
 }
@@ -112,7 +153,7 @@ ui <- fluidPage(
                  textAreaInput("client_address", "Address", value = "New York, USA", rows = 2),
                  
                  h4("Project & Period"),
-                 textInput("project_title", "Project Title", value = "2024 Reporting Preparation and Application Coding"),
+                 textInput("project_title", "Project Title", placeholder = "Evaluation project, etc..."),
                  dateInput("period_start", "Period Start", value = Sys.Date() - 30),
                  dateInput("period_end", "Period End", value = Sys.Date()),
                  
@@ -210,19 +251,29 @@ server <- function(input, output, session) {
   })
   
   # Draft table
-  output$draft_table <- renderDT(
-    {
-      draft() %>%
-        datatable(
-          rownames   = FALSE,
-          selection  = "multiple",
-          colnames   = c("ID","Date","Description","Hours","Rate","Amount"),
-          options    = list(pageLength = 8),
-          extensions = "Buttons"
-        )
-    },
-    server = FALSE   # <-- goes here, not inside datatable()
-  )
+  output$draft_table <- DT::renderDT({
+    df <- draft()
+    if (is.null(df) || !nrow(df)) {
+      return(DT::datatable(data.frame(Message = "No draft items yet."), rownames = FALSE))
+    }
+    # display-friendly columns
+    df_display <- data.frame(
+      ID          = df$id,
+      Date        = as.character(df$task_date),
+      Description = as.character(df$description),
+      Hours       = df$hours,
+      Rate        = df$rate,
+      Amount      = df$amount,
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    DT::datatable(
+      df_display,
+      rownames = FALSE,
+      selection = "multiple",
+      options   = list(pageLength = 8)
+    )
+  }, server = FALSE)
   
   # Delete selected rows
   observeEvent(input$delete_selected, {
@@ -343,19 +394,51 @@ server <- function(input, output, session) {
   })
   
   # Archive table
-  output$archive_table <- renderDT({
-    invs <- dbReadTable(con, "invoices") %>%
-      arrange(desc(created_at)) %>%
-      mutate(
-        Created = as.character(as_datetime(created_at)),
-        Total = scales::dollar(total_amount),
-        PDF = ifelse(file.exists(pdf_path), pdf_path, NA)
-      ) %>%
-      select(invoice_number, Created, client_org, project_title, total_hours, Total, PDF)
+  output$archive_table <- DT::renderDT({
+    if (!DBI::dbExistsTable(con, "invoices")) {
+      return(DT::datatable(data.frame(Message = "No invoices yet."), rownames = FALSE))
+    }
+    invs_raw <- tryCatch(DBI::dbReadTable(con, "invoices"), error = function(e) NULL)
+    if (is.null(invs_raw) || !nrow(invs_raw)) {
+      return(DT::datatable(data.frame(Message = "No invoices yet."), rownames = FALSE))
+    }
     
-    datatable(invs, rownames = FALSE, escape = FALSE, options = list(pageLength = 10)) %>%
-      formatStyle("Total", fontWeight = "bold")
-  })
+    created_chr <- suppressWarnings(format(as.POSIXct(as.character(invs_raw$created_at), tz = "UTC"),
+                                           "%Y-%m-%d %H:%M:%S"))
+    created_chr[is.na(created_chr)] <- ""
+    
+    total_num <- suppressWarnings(as.numeric(invs_raw$total_amount))
+    total_chr <- ifelse(is.na(total_num), "", paste0("$", formatC(total_num, format = "f", digits = 2, big.mark = ",")))
+    
+    pdf_local  <- as.character(invs_raw$pdf_path)
+    pdf_exists <- !is.na(pdf_local) & nzchar(pdf_local) & file.exists(pdf_local)
+    
+    # NOTE: no leading "/" — use relative path so it honors Workbench prefixes
+    pdf_href <- ifelse(
+      pdf_exists,
+      paste0('<a href="invoices/', utils::URLencode(basename(pdf_local)),
+             '" target="_blank" rel="noopener">Open PDF</a>'),
+      ""
+    )
+    
+    df <- data.frame(
+      `Invoice #`   = as.character(invs_raw$invoice_number),
+      Created       = created_chr,
+      Client        = as.character(invs_raw$client_org),
+      Project       = as.character(invs_raw$project_title),
+      `Total Hours` = as.character(invs_raw$total_hours),
+      Total         = total_chr,
+      PDF           = pdf_href,
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    df[is.na(df)] <- ""
+    
+    pdf_col <- which(names(df) == "PDF")
+    esc_idx <- if (length(pdf_col) == 1) setdiff(seq_len(ncol(df)), pdf_col) else seq_len(ncol(df))
+    
+    DT::datatable(df, rownames = FALSE, escape = esc_idx, options = list(pageLength = 10))
+  }, server = FALSE)
 }
 
 shinyApp(ui, server)

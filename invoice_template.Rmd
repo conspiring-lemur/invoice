@@ -6,6 +6,7 @@ output:
     number_sections: false
     latex_engine: xelatex
 geometry: margin=1in
+fontsize: 11pt
 params:
   invoice_number: ""
   consultant_name: ""
@@ -16,43 +17,198 @@ params:
   project_title: ""
   period_start: ""
   period_end: ""
-  items: !r data.frame()
+  items: !r data.frame()   # Columns: Date, Description, Hours, Rate, Amount
   total_hours: 0
   total_amount: 0
   invoice_date: ""
+  # --- New optional styling/metadata params ---
+  logo_path: ""            # e.g., "www/logo.png" or "logo.png"; leave "" if none
+  brand_color: "#0B5C5C"   # primary color (headers, rules)
+  accent_color: "#A46A2B"  # accent color (totals box)
+  currency_symbol: "$"
+  payment_terms: "Payment due within 30 days by ACH or check."
+  notes: ""                # free-text notes block (optional)
+header-includes:
+  - \usepackage{fontspec}
+  - \setmainfont{Arial} % change to Inter/Calibri if installed
+  - \usepackage{graphicx}
+  - \usepackage[table]{xcolor}
+  - \usepackage{tabularx}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{lastpage}
+  - \usepackage{fancyhdr}
+  - \usepackage{booktabs}
+  - \usepackage{wrapfig}
+  - \usepackage{tcolorbox}
+  - \definecolor{Brand}{HTML}{0B5C5C}
+  - \definecolor{Accent}{HTML}{A46A2B}
+  - \definecolor{BrandLight}{HTML}{DDE8E8}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \fancyfoot[L]{\textcolor{Brand}{\textbf{`r params$client_org`}}}
+  - \fancyfoot[C]{\textcolor{gray}{Invoice `r params$invoice_number`}}
+  - \fancyfoot[R]{\textcolor{gray}{Page \thepage\ of \pageref{LastPage}}}
+  - \renewcommand{\headrulewidth}{0pt}
+  - \renewcommand{\footrulewidth}{0pt}
 ---
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 
-## **Invoice: `r params$invoice_number`**
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(scales)
+  library(kableExtra)
+  library(glue)
+})
 
-**Consultant:**  
-`r params$consultant_name`  
-`r params$consultant_address`
+# Allow runtime override of colors from params
+brand_col  <- params$brand_color %||% "#0B5C5C"
+accent_col <- params$accent_color %||% "#A46A2B"
 
-**Bill To:**  
-`r params$client_name`  
-`r params$client_org`  
-`r params$client_address`
+# Simple helpers
+dollar2 <- function(x) paste0(params$currency_symbol %||% "$", number_format(accuracy = 0.01, big.mark = ",")(x))
 
-**Project:** `r params$project_title`  
-**Invoice Period:** `r params$period_start` – `r params$period_end`  
-**Invoice Date:** `r params$invoice_date`
-
-### Task Details
-```{r, echo=FALSE}
-library(knitr); library(dplyr); library(scales)
+# Normalize items frame
 items <- params$items %>%
-  mutate(Date = as.character(Date),
-         Hours = round(Hours, 2),
-         Rate = dollar(Rate),
-         Amount = dollar(Amount)) %>%
+  mutate(
+    Date = as.character(Date),
+    Hours = round(as.numeric(Hours), 2),
+    Rate  = as.numeric(Rate),
+    Amount= as.numeric(Amount)
+  ) %>%
   select(Date, Description, Hours, Rate, Amount)
-kable(items, align="l", booktabs=TRUE)
+
+total_hours  <- round(as.numeric(params$total_hours), 2)
+total_amount <- as.numeric(params$total_amount)
+
+# Color theming for kableExtra (apply runtime Brand color)
+kable_brand_header <- function(kbl_obj) {
+  kbl_obj %>%
+    kableExtra::row_spec(0, bold = TRUE, color = "white", background = brand_col)
+}
 ```
 
-Total Hours: `r round(params$total_hours, 2)`
-Amount Due: `r scales::dollar(params$total_amount)`
+```{r header-block, results='asis'}
+# Header bar with logo (if provided) and invoice meta box
+logo_exists <- tryCatch(nzchar(params$logo_path) && file.exists(params$logo_path), error = function(e) FALSE)
 
-Consultant’s Signature: ________________________________
-Date: __________________
+cat(glue('
+\\begin{{tcolorbox}}[
+  colback={BrandLight}!40,
+  colframe={Brand},
+  boxrule=0.6pt,
+  arc=1.5mm,
+  left=3mm,right=3mm,top=3mm,bottom=3mm
+]
+\\begin{{minipage}}[t]{{0.62\\textwidth}}
+  {{\\Large\\bfseries \\textcolor{{Brand}}{{Invoice}}}}\\\\[-2mm]
+  \\rule{{\\linewidth}}{{0.6pt}}\\\\[1mm]
+  \\textbf{{Consultant}}\\\\
+  {params$consultant_name}\\\\
+  {params$consultant_address}\\\\[2mm]
+  \\textbf{{Bill To}}\\\\
+  {params$client_name}\\\\
+  {params$client_org}\\\\
+  {params$client_address}
+\\end{{minipage}}
+\\hfill
+\\begin{{minipage}}[t]{{0.35\\textwidth}}
+  \\raggedleft
+  '))
 
+if (logo_exists) {
+  cat(glue('\\includegraphics[width=4.0cm]{{{params$logo_path}}}\\\\[2mm]'))
+}
 
+cat(glue('
+  \\setlength{{\\tabcolsep}}{{3pt}}
+  \\renewcommand{{\\arraystretch}}{{1.2}}
+  \\begin{{tabular}}{{@{{}} >{{\\raggedleft\\arraybackslash}}p{{2.4cm}} @{{\\hspace{{4pt}}}} p{{3cm}} @{{}}}}
+  \\textbf{{Invoice \\#}}: & {params$invoice_number}\\\\
+  \\textbf{{Date}}: & {params$invoice_date}\\\\
+  \\textbf{{Period}}: & {params$period_start}--{params$period_end}\\\\
+  \\textbf{{Project}}: & {params$project_title}\\\\
+  \\end{{tabular}}
+\\end{{minipage}}
+\\end{{tcolorbox}}
+'))
+```
+
+```{r items-table, results = 'asis'}
+if (nrow(items) == 0) {
+  cat("\\textit{No line items provided.}")
+} else {
+  kbl <- knitr::kable(
+    items %>%
+      mutate(
+        Rate   = dollar2(Rate),
+        Amount = dollar2(Amount)
+      ),
+    format = "latex",
+    booktabs = TRUE,
+    longtable = TRUE,
+    align = c("l","p{8cm}","r","r","r"),
+    col.names = c("Date", "Description", "Hours", "Rate", "Amount"),
+    escape = TRUE
+  ) %>%
+    kable_brand_header() %>%
+    kableExtra::kable_styling(
+      latex_options = c("hold_position", "striped"),
+      stripe_color = "#F5F7F7"
+    ) %>%
+    kableExtra::column_spec(2, width = "8cm") %>%
+    kableExtra::column_spec(3, width = "1.2cm") %>%
+    kableExtra::column_spec(4, width = "1.6cm") %>%
+    kableExtra::column_spec(5, width = "2.0cm")
+
+  kbl %>% print()
+}
+```
+
+```{r totals-card, results = 'asis'}
+cat(glue('
+\\vspace{{2mm}}
+\\begin{{tcolorbox}}[
+  colback=white,
+  colframe=Accent,
+  boxrule=0.8pt,
+  arc=1.5mm,
+  left=4mm,right=4mm,top=3mm,bottom=3mm
+]
+\\begin{{tabular}}{{@{{}} p{{3.5cm}} >{{\\raggedleft\\arraybackslash}}p{{4cm}} @{{}}}}
+\\textbf{{Total Hours}} & {format(total_hours, nsmall = 2)} \\\\
+\\textbf{{Amount Due}} & \\textbf{{{dollar2(total_amount)}}} \\\\
+\\end{{tabular}}
+\\end{{tcolorbox}}
+'))
+```
+
+```{r notes-terms, results = 'asis'}
+
+has_notes <- tryCatch(nzchar(params$notes), error = function(e) FALSE)
+if (has_notes) {
+  cat(glue('
+  \\vspace{{1mm}}
+  \\textbf{{Notes}}\\\\
+  {params$notes}
+  '))
+}
+
+if (nzchar(params$payment_terms)) {
+  cat(glue('
+  \\vspace{{3mm}}
+  \\textbf{{Payment Terms}}\\\\
+  {params$payment_terms}
+  '))
+}
+```
+
+```{r signature, results = 'asis'}
+cat('
+\\vspace{10mm}
+
+\\textbf{Consultant’s Signature:} \\rule{7cm}{0.4pt} \\hfill \\textbf{Date:} \\rule{3.5cm}{0.4pt}
+')
+
+```
